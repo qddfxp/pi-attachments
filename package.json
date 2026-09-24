@@ -10,13 +10,13 @@
     "images"
   ],
   "license": "MIT",
-  "author": "YOUR NAME",
+  "author": "qddfxp",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USER/pi-attachments.git"
+    "url": "git+https://github.com/qddfxp/pi-attachments.git"
   },
-  "homepage": "https://github.com/YOUR_GITHUB_USER/pi-attachments#readme",
-  "bugs": "https://github.com/YOUR_GITHUB_USER/pi-attachments/issues",
+  "homepage": "https://github.com/qddfxp/pi-attachments#readme",
+  "bugs": "https://github.com/qddfxp/pi-attachments/issues",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

@@ -21,7 +21,7 @@ C:\work\proj\report.pdf                         →  正文就是附件块
 
 ```bash
 pi install npm:pi-attachments            # from npm, once published
-pi install git:github.com/YOUR_GITHUB_USER/pi-attachments
+pi install git:github.com/qddfxp/pi-attachments
 pi install /absolute/path/to/pi-attachments
 
 pi -e /absolute/path/to/pi-attachments   # try it without installing
@@ -114,25 +114,21 @@ The package is already shaped for the gallery: the `pi` manifest points at
 `extensions/`, and the `pi-package` keyword makes it show up on
 [pi.dev/packages](https://pi.dev/packages).
 
-**Before the first publish**, replace the placeholders:
-
-| File | Replace |
-|---|---|
-| `LICENSE` | `YOUR NAME` |
-| `package.json` | `author`, `repository`, `homepage`, `bugs` (`YOUR_GITHUB_USER`) |
-| `README.md` | `YOUR_GITHUB_USER` in the install examples |
-
-Then:
+The repository does not exist on GitHub yet, so create it first and push:
 
 ```bash
-git init && git add -A && git commit -m "chore: initial import"
+gh repo create qddfxp/pi-attachments --public --source . --push
+# or create it on github.com, then:
+#   git remote add origin https://github.com/qddfxp/pi-attachments.git
+#   git push -u origin main
+
 npm version patch
 npm publish --access public
 ```
 
-`.github/workflows/ci.yml` runs `npm run verify` on Ubuntu and Windows once the
-repository has a remote. Windows is in the matrix on purpose: backslash paths,
-drive letters, and case-folded dedupe are the parts Linux CI cannot see.
+`.github/workflows/ci.yml` starts running `npm run verify` on Ubuntu and Windows as
+soon as the repository has a remote. Windows is in the matrix on purpose: backslash
+paths, drive letters, and case-folded dedupe are the parts Linux CI cannot see.
 
 Add `"image"` or `"video"` to the `pi` block in `package.json` if you want a preview
 on the gallery card.
@@ -145,4 +141,4 @@ on the gallery card.
 
 **只有整条消息就是路径时才会改写你的正文**（拖完直接回车那种），其余情况正文原样不动、只在末尾加一个附件块——所以粘贴一堆绝对路径的报错日志不会被抠走路径。`!` shell 命令和 `/` 命令**不会**带附件。图片超过 4.5MB 或魔数不是图片时，退回按路径交给模型；单条消息最多解析 256 个候选路径（防大粘贴卡输入）。
 
-发布前记得替换 `LICENSE` 里的 `YOUR NAME` 和 `package.json` 里的 `YOUR_GITHUB_USER`，然后 `npm publish --access public`，带上 `pi-package` 关键字就会出现在 pi 官方插件库。
+发布：仓库还没建，先在 GitHub 建 `qddfxp/pi-attachments` 并推送（`gh repo create qddfxp/pi-attachments --public --source . --push`），然后 `npm publish --access public`；带上 `pi-package` 关键字就会出现在 pi 官方插件库。
