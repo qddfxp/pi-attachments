@@ -6,6 +6,8 @@ import test from "node:test";
 
 import piAttachments, {
   ATTACHMENT_BLOCK_HEADER,
+  MAX_LISTED_ATTACHMENTS,
+  MAX_PENDING_ATTACHMENTS,
   MAX_RESOLVE_CANDIDATES,
   STATUS_KEY,
   buildPrompt,
@@ -29,6 +31,8 @@ const liarPath = join(sandbox, "liar.png");
 /** A nested directory whose name and file name both contain spaces. */
 const spacedDir = join(sandbox, "my files");
 const spacedPath = join(spacedDir, "report final.txt");
+/** Enough files to fill the pending queue and overflow the listing. */
+const queueDir = join(sandbox, "queue");
 
 writeFileSync(notesPath, "# notes\n");
 writeFileSync(shotPath, Buffer.from(PNG_BASE64, "base64"));
@@ -36,6 +40,10 @@ writeFileSync(shotPath, Buffer.from(PNG_BASE64, "base64"));
 writeFileSync(liarPath, "definitely not an image\n");
 mkdirSync(spacedDir);
 writeFileSync(spacedPath, "spaced\n");
+mkdirSync(queueDir);
+for (let index = 0; index < MAX_PENDING_ATTACHMENTS + 8; index += 1) {
+  writeFileSync(join(queueDir, `q${index}.txt`), "queued\n");
+}
 
 test.after(() => rmSync(sandbox, { recursive: true, force: true }));
 
@@ -328,8 +336,48 @@ test("an absolute path is never mistaken for a slash command", () => {
   // is `/tmp/...`, and that is the case that made the whole extension a no-op.
   assert.equal(isShellOrCommandInput(`${notesPath}`, sandbox), false);
   assert.equal(isShellOrCommandInput(`${notesPath} 看下这个`, sandbox), false);
+  // Portable guard for the same regression: a command name has no further
+  // separator, so this stays a path on every platform even though nothing is there.
+  assert.equal(isShellOrCommandInput("/tmp/does/not/exist.md", sandbox), false);
+  assert.equal(isShellOrCommandInput("/usr/local/bin/tool notes.md", sandbox), false);
   // A command name that happens to have no file behind it stays a command.
   assert.equal(isShellOrCommandInput("/copy", sandbox), true);
+});
+
+test("/attach stops accepting once the queue is full", async () => {
+  const { pi, input } = loadExtension();
+  const ctx = createStubCtx(sandbox);
+  const attach = pi.commands.get("attach");
+
+  for (let index = 0; index < MAX_PENDING_ATTACHMENTS; index += 1) {
+    await attach.handler(`./queue/q${index}.txt`, ctx);
+  }
+  assert.match(ctx.statuses.get(STATUS_KEY), new RegExp(`^📎 ${MAX_PENDING_ATTACHMENTS}:`));
+
+  await attach.handler(`./queue/q${MAX_PENDING_ATTACHMENTS}.txt`, ctx);
+  assert.ok(
+    ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("上限")),
+    "overflowing the queue must warn instead of growing without bound",
+  );
+
+  const result = await input({ type: "input", text: "总结这些", source: "interactive" }, ctx);
+  const listed = result.text.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(listed.length, MAX_PENDING_ATTACHMENTS);
+});
+
+test("/attachments summarises a queue that is too long to list", async () => {
+  const { pi } = loadExtension();
+  const ctx = createStubCtx(sandbox);
+  const queued = MAX_LISTED_ATTACHMENTS + 5;
+
+  for (let index = 0; index < queued; index += 1) {
+    await pi.commands.get("attach").handler(`./queue/q${index}.txt`, ctx);
+  }
+  await pi.commands.get("attachments").handler("", ctx);
+
+  const message = ctx.notifications.at(-1).message;
+  assert.match(message, /…还有 5 个/);
+  assert.equal(message.split("\n").length, MAX_LISTED_ATTACHMENTS + 1);
 });
 
 test("attaches a dropped image as an image block", async () => {

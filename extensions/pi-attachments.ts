@@ -33,6 +33,10 @@ export const MAX_IMAGE_BYTES = 4.5 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_CANDIDATE_LENGTH = 4096;
 const MAX_PICKER_ENTRIES = 200;
+/** Queueing hundreds of files helps nobody; the block would dwarf the message. */
+export const MAX_PENDING_ATTACHMENTS = 32;
+/** Longest queue `/attachments` prints before summarising the rest. */
+export const MAX_LISTED_ATTACHMENTS = 20;
 /**
  * A pasted build log can contain thousands of path-like tokens, and every
  * candidate that survives the cheap checks costs a synchronous `stat`. Stop
@@ -340,14 +344,20 @@ export function buildPrompt(message: string, files: Attachment[]): string {
  * an attachment.
  *
  * A leading slash alone is not enough to call something a command: on POSIX every
- * absolute path starts with `/`, so `/tmp/a/notes.md` must stay a path. The first
- * token only counts as a command name when it is not an existing file.
+ * absolute path starts with `/`. A command name has no further separator and no
+ * file behind it, so `/tmp/out/notes.md` stays a path while `/copy` stays a command.
  */
+const COMMAND_SHAPE = /^\/[^\s/\\]*(?:\s|$)/;
+
 export function isShellOrCommandInput(text: string, cwd: string): boolean {
-  const firstToken = text.trimStart().split(/\s+/, 1)[0] ?? "";
-  if (firstToken.startsWith("!")) return true;
-  if (!firstToken.startsWith("/")) return false;
-  return resolveCandidate(firstToken, cwd) === null;
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("!")) return true;
+  if (!COMMAND_SHAPE.test(trimmed)) return false;
+
+  // A real file at that exact path wins over the command reading.
+  const [firstToken] = scanCandidateTokens(trimmed);
+  if (!firstToken || firstToken.start !== 0) return true;
+  return resolveCandidate(firstToken.text, cwd) === null;
 }
 
 function toImageContent(attachment: Attachment): ImageContent | null {
@@ -369,8 +379,7 @@ function listFiles(directory: string): string[] {
     return readdirSync(directory, { withFileTypes: true })
       .filter((entry) => entry.isFile())
       .map((entry) => entry.name)
-      .sort((a, b) => a.localeCompare(b))
-      .slice(0, MAX_PICKER_ENTRIES);
+      .sort((a, b) => a.localeCompare(b));
   } catch {
     return [];
   }
@@ -447,7 +456,8 @@ export default function piAttachments(pi: ExtensionAPI): void {
   pi.registerCommand("attach", {
     description: "把文件附加到下一条消息（不拖拽的替代方式）",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-      const files = listFiles(completionCwd);
+      const files = listFiles(completionCwd)
+        .slice(0, MAX_PICKER_ENTRIES);
       const matches = files
         .filter((name) => name.toLowerCase().startsWith(prefix.toLowerCase()))
         .map((name) => ({ value: name, label: name }));
@@ -455,10 +465,15 @@ export default function piAttachments(pi: ExtensionAPI): void {
     },
     handler: async (args, ctx) => {
       const requested = args.trim();
-      const chosen = requested || await ctx.ui.select(
-        "选择要附加的文件（当前目录）",
-        listFiles(ctx.cwd),
-      );
+      let chosen = requested;
+      if (!chosen) {
+        const files = listFiles(ctx.cwd);
+        const shown = files.slice(0, MAX_PICKER_ENTRIES);
+        const title = files.length > shown.length
+          ? `选择要附加的文件（共 ${files.length} 个，仅列前 ${shown.length} 个）`
+          : "选择要附加的文件（当前目录）";
+        chosen = await ctx.ui.select(title, shown) ?? "";
+      }
       if (!chosen) return;
 
       const attachment = resolveCandidate(chosen, ctx.cwd)
@@ -467,7 +482,12 @@ export default function piAttachments(pi: ExtensionAPI): void {
         ctx.ui.notify(`找不到文件：${chosen}`, "error");
         return;
       }
-      pending = dedupeAttachments([...pending, attachment]);
+      const next = dedupeAttachments([...pending, attachment]);
+      if (next.length > MAX_PENDING_ATTACHMENTS) {
+        ctx.ui.notify(`待发附件已达上限 ${MAX_PENDING_ATTACHMENTS} 个，先发送或 /attachments clear`, "warning");
+        return;
+      }
+      pending = next;
       refreshStatus(ctx);
       ctx.ui.notify(`已附加 ${attachment.name}`, "info");
     },
@@ -490,7 +510,12 @@ export default function piAttachments(pi: ExtensionAPI): void {
         ctx.ui.notify("当前没有待发附件。把文件拖进终端，或用 /attach 添加。", "info");
         return;
       }
-      ctx.ui.notify(pending.map((file) => `${file.name} — ${file.path}`).join("\n"), "info");
+      const shown = pending.slice(0, MAX_LISTED_ATTACHMENTS);
+      const lines = shown.map((file) => `${file.name} — ${file.path}`);
+      if (pending.length > shown.length) {
+        lines.push(`…还有 ${pending.length - shown.length} 个（/attachments clear 清空）`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 }

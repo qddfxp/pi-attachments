@@ -81,6 +81,7 @@ shell command would be executed, so the extension refuses and warns instead.
 - Images up to **4.5 MB** are attached inline (the same budget pi uses). Larger files, or a `.png` whose bytes are not really an image, fall back to a path reference and tell you so.
 - Nothing is copied anywhere. The model reads the file at its real location, so it must be inside the session's working directory for the agent to open it.
 - Resolution stops after **256 path-like candidates** in one message. A pasted build log is already the worst case: 8000 candidates cost ~650 ms before this cap and ~11 ms after, and the message itself is never modified.
+- `/attach` queues at most **32 files**, and `/attachments` lists the first 20 before summarising the rest. A block with hundreds of paths would dwarf the message it belongs to.
 
 ## How it works
 
@@ -139,6 +140,6 @@ on the gallery card.
 
 用法：拖文件 / 粘贴路径 / `/attach` 选文件，页脚会显示 `📎` 待发附件。只识别你明确写成文件的引用（绝对路径、`@./x`、`./x`、`.\x`、`../x`、`~/x`、带引号或转义空格的路径），句子里的 `src/index.ts` 不会被动；`:行:列` 只在绝对路径或显式标记的相对路径上生效。
 
-**只有整条消息就是路径时才会改写你的正文**（拖完直接回车那种），其余情况正文原样不动、只在末尾加一个附件块——所以粘贴一堆绝对路径的报错日志不会被抠走路径。`!` shell 命令和 `/` 命令**不会**带附件。图片超过 4.5MB 或魔数不是图片时，退回按路径交给模型；单条消息最多解析 256 个候选路径（防大粘贴卡输入）。
+**只有整条消息就是路径时才会改写你的正文**（拖完直接回车那种），其余情况正文原样不动、只在末尾加一个附件块——所以粘贴一堆绝对路径的报错日志不会被抠走路径。`!` shell 命令和 `/` 命令**不会**带附件（Linux 上以 `/` 开头的绝对路径不会被误判成命令）。图片超过 4.5MB 或魔数不是图片时，退回按路径交给模型；单条消息最多解析 256 个候选路径（防大粘贴卡输入），`/attach` 队列上限 32 个。
 
 发布：仓库还没建，先在 GitHub 建 `qddfxp/pi-attachments` 并推送（`gh repo create qddfxp/pi-attachments --public --source . --push`），然后 `npm publish --access public`；带上 `pi-package` 关键字就会出现在 pi 官方插件库。
