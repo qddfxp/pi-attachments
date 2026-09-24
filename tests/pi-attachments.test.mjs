@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 
 import piAttachments, {
@@ -240,7 +240,13 @@ test("ignores bare relative names and missing files", () => {
 
 test("resolves relative, escaped, and home-relative references", () => {
   assert.equal(resolveCandidate(`./notes.md`, sandbox)?.path, notesPath);
-  assert.equal(resolveCandidate(`.\\notes.md`, sandbox)?.path, notesPath);
+  // `.\` and `..\` are separators only on Windows; the shape check is portable, the
+  // resolution is not (on POSIX a backslash is an ordinary file-name character).
+  assert.equal(isDeliberatePathReference(".\\notes.md"), true);
+  assert.equal(isDeliberatePathReference("..\\notes.md"), true);
+  if (sep === "\\") {
+    assert.equal(resolveCandidate(`.\\notes.md`, sandbox)?.path, notesPath);
+  }
   // `@name` alone is not a path reference, but `@./name` is.
   assert.equal(resolveCandidate("@notes.md", sandbox), null);
   assert.equal(resolveCandidate("@./notes.md", sandbox)?.path, notesPath);
@@ -307,9 +313,23 @@ test("deduplicates attachments by path", () => {
 });
 
 test("recognises shell and slash command input", () => {
-  assert.equal(isShellOrCommandInput("!ls"), true);
-  assert.equal(isShellOrCommandInput("  /model"), true);
-  assert.equal(isShellOrCommandInput("hello"), false);
+  assert.equal(isShellOrCommandInput("!ls", sandbox), true);
+  assert.equal(isShellOrCommandInput("  !ls -la", sandbox), true);
+  assert.equal(isShellOrCommandInput("!!ls", sandbox), true);
+  assert.equal(isShellOrCommandInput("/model", sandbox), true);
+  assert.equal(isShellOrCommandInput("/skill:review", sandbox), true);
+  assert.equal(isShellOrCommandInput("hello", sandbox), false);
+  assert.equal(isShellOrCommandInput("", sandbox), false);
+});
+
+test("an absolute path is never mistaken for a slash command", () => {
+  // On POSIX every absolute path starts with `/`, which is also the command
+  // prefix. On this machine `notesPath` is `C:\...`; on the CI's Linux runner it
+  // is `/tmp/...`, and that is the case that made the whole extension a no-op.
+  assert.equal(isShellOrCommandInput(`${notesPath}`, sandbox), false);
+  assert.equal(isShellOrCommandInput(`${notesPath} 看下这个`, sandbox), false);
+  // A command name that happens to have no file behind it stays a command.
+  assert.equal(isShellOrCommandInput("/copy", sandbox), true);
 });
 
 test("attaches a dropped image as an image block", async () => {

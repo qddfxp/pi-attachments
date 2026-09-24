@@ -335,9 +335,19 @@ export function buildPrompt(message: string, files: Attachment[]): string {
   return body ? `${body}\n\n${block}` : block;
 }
 
-export function isShellOrCommandInput(text: string): boolean {
-  const trimmed = text.trimStart();
-  return trimmed.startsWith("!") || trimmed.startsWith("/");
+/**
+ * `!cmd` runs in the shell and `/cmd` is expanded as a command; neither may carry
+ * an attachment.
+ *
+ * A leading slash alone is not enough to call something a command: on POSIX every
+ * absolute path starts with `/`, so `/tmp/a/notes.md` must stay a path. The first
+ * token only counts as a command name when it is not an existing file.
+ */
+export function isShellOrCommandInput(text: string, cwd: string): boolean {
+  const firstToken = text.trimStart().split(/\s+/, 1)[0] ?? "";
+  if (firstToken.startsWith("!")) return true;
+  if (!firstToken.startsWith("/")) return false;
+  return resolveCandidate(firstToken, cwd) === null;
 }
 
 function toImageContent(attachment: Attachment): ImageContent | null {
@@ -398,7 +408,7 @@ export default function piAttachments(pi: ExtensionAPI): void {
 
     // A shell command or slash command is executed literally; attachment paths
     // must never become part of that string.
-    if (isShellOrCommandInput(event.text)) {
+    if (isShellOrCommandInput(event.text, ctx.cwd)) {
       ctx.ui.notify("附件不能和 ! / / 命令一起发送，请先移除路径或 /attachments clear", "warning");
       return { action: "continue" };
     }
