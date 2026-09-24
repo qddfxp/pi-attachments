@@ -40,10 +40,18 @@ export const ATTACHMENTS_DIRECTORY = ".pi-attachments";
  * into memory at all.
  */
 export const MAX_IMAGE_READ_BYTES = 32 * 1024 * 1024;
+/**
+ * Total image bytes inlined into one message. A single image is already bounded, but
+ * the queue can hold dozens of files, and reading them all into memory at once is not
+ * something a prompt that large would justify anyway. The rest travel as paths.
+ */
+export const MAX_INLINED_IMAGE_BYTES = 128 * 1024 * 1024;
+/** Clipboard entries offered in the picker. A clipboard can hold thousands of files. */
+export const MAX_CLIPBOARD_ENTRIES = 50;
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_CANDIDATE_LENGTH = 4096;
-const MAX_PICKER_ENTRIES = 200;
+export const MAX_PICKER_ENTRIES = 200;
 /** Queueing hundreds of files helps nobody; the block would dwarf the message. */
 export const MAX_PENDING_ATTACHMENTS = 32;
 /** Longest queue `/attachments` prints before summarising the rest. */
@@ -498,13 +506,15 @@ export function extractAttachments(text: string, cwd: string): { text: string; f
   remainder += text.slice(cursor);
   if (!isOnlyPunctuation(remainder)) return { text, files };
 
-  let result = "";
-  cursor = 0;
-  for (const match of matches) {
-    result += text.slice(cursor, match.from);
-    result += match.attachment.image ? `[image: ${match.attachment.name}]` : "";
-    cursor = match.to;
-  }
+    let result = "";
+    cursor = 0;
+    for (const match of matches) {
+      result += text.slice(cursor, match.from);
+      // Neutral wording: the extension only guesses that this is an image, and the
+      // sniffer may still disagree and send it on as a path.
+      result += match.attachment.image ? `[attachment: ${match.attachment.name}]` : "";
+      cursor = match.to;
+    }
 
   const cleaned = tidyWhitespace(`${result}${text.slice(cursor)}`);
   return {
@@ -582,6 +592,39 @@ function toImageContent(attachment: Attachment): ImageContent | null {
   const mimeType = sniffImageMimeType(bytes);
   if (!mimeType || bytes.length > MAX_IMAGE_READ_BYTES) return null;
   return { type: "image", data: bytes.toString("base64"), mimeType };
+}
+
+/**
+ * Builds the picker options and the option→path lookup in one place, so a label can
+ * never disagree with what it resolves to — that mismatch is exactly how two
+ * same-named clipboard files became unselectable.
+ */
+export function buildAttachmentOptions(
+  clipboardFiles: Attachment[],
+  directoryFiles: string[],
+): { options: string[]; byOption: Map<string, string> } {
+  const shownClipboard = clipboardFiles.slice(0, MAX_CLIPBOARD_ENTRIES);
+  const labels = formatClipboardLabels(shownClipboard);
+  const shownDirectory = directoryFiles.slice(0, MAX_PICKER_ENTRIES);
+
+  const byOption = new Map<string, string>();
+  labels.forEach((label, index) => {
+    const path = shownClipboard[index]?.path;
+    if (path) byOption.set(label, path);
+  });
+  for (const name of shownDirectory) {
+    if (!byOption.has(name)) byOption.set(name, name);
+  }
+  return { options: [...labels, ...shownDirectory], byOption };
+}
+
+/** True when this image still fits the per-message image budget. */
+export function imageFitsBudget(
+  usedBytes: number,
+  attachment: Attachment,
+  budget = MAX_INLINED_IMAGE_BYTES,
+): boolean {
+  return attachment.image && usedBytes + attachment.size <= budget;
 }
 
 /**
@@ -697,14 +740,25 @@ export default function piAttachments(pi: ExtensionAPI): void {
     const images: ImageContent[] = [];
     const files: Attachment[] = [];
     const keptAsPath: string[] = [];
+    const overBudget: string[] = [];
+    let inlinedBytes = 0;
     for (const attachment of attachments) {
       if (!attachment.image) {
         files.push(attachment);
         continue;
       }
+      // Bound the whole message, not just each file: a queue full of large screenshots
+      // would otherwise be read into memory before anything is sent.
+      if (!imageFitsBudget(inlinedBytes, attachment)) {
+        overBudget.push(attachment.name);
+        files.push(attachment);
+        continue;
+      }
       const content = toImageContent(attachment);
-      if (content) images.push(content);
-      else {
+      if (content) {
+        images.push(content);
+        inlinedBytes += attachment.size;
+      } else {
         keptAsPath.push(attachment.name);
         files.push(attachment);
       }
@@ -712,6 +766,13 @@ export default function piAttachments(pi: ExtensionAPI): void {
     if (keptAsPath.length > 0) {
       ctx.ui.notify(
         `${keptAsPath.join(", ")}: not an image on inspection, or over ${formatBytes(MAX_IMAGE_READ_BYTES)} — passed on as a path`,
+        "warning",
+      );
+    }
+    if (overBudget.length > 0) {
+      ctx.ui.notify(
+        `Image budget for one message is ${formatBytes(MAX_INLINED_IMAGE_BYTES)}; `
+          + `${overBudget.join(", ")} passed on as a path`,
         "warning",
       );
     }
@@ -749,24 +810,19 @@ export default function piAttachments(pi: ExtensionAPI): void {
       if (!chosen) {
         const fromClipboard = (await clipboardRead)
           .map((filePath) => resolveCandidate(filePath, ctx.cwd))
-          .filter((file): file is Attachment => file !== null);
-        const clipboardLabels = formatClipboardLabels(fromClipboard);
-        const shown = files.slice(0, MAX_PICKER_ENTRIES);
-        const options = [...clipboardLabels, ...shown];
+          .filter((file): file is Attachment => file !== null)
+          .slice(0, MAX_CLIPBOARD_ENTRIES);
+        const { options, byOption } = buildAttachmentOptions(fromClipboard, files);
         if (options.length === 0) {
           ctx.ui.notify("No files in this directory and no file paths on the clipboard", "warning");
           return;
         }
-        const title = files.length > shown.length
-          ? `Choose a file to attach (${files.length} here, first ${shown.length} listed)`
+        const title = files.length > MAX_PICKER_ENTRIES
+          ? `Choose a file to attach (${files.length} here, first ${MAX_PICKER_ENTRIES} listed)`
           : "Choose a file to attach (session directory)";
         const picked = await ctx.ui.select(title, options);
         if (!picked) return;
-        // Look the pick up by position: two same-named files in different folders
-        // produce different labels, and `find` on the label would always hit the first.
-        const clipboardIndex = clipboardLabels.indexOf(picked);
-        const clipboardPick = clipboardIndex >= 0 ? fromClipboard[clipboardIndex] : undefined;
-        chosen = clipboardPick?.path ?? picked;
+        chosen = byOption.get(picked) ?? picked;
       }
       if (!chosen) return;
 

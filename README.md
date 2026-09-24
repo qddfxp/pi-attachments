@@ -14,7 +14,7 @@ Dragging a file into a terminal only inserts its **path as text**. The model the
 
 ```
 看下这个 C:\work\proj\screenshot.png 对不对?     →  images: [screenshot.png]        正文不动
-C:\work\proj\screenshot.png                     →  正文变成  [image: screenshot.png]
+C:\work\proj\screenshot.png                     →  正文变成  [attachment: screenshot.png]
 总结一下 C:\work\proj\report.pdf                →  正文不动 + 末尾多一个附件块
 C:\work\proj\report.pdf                         →  正文就是附件块
 
@@ -75,7 +75,7 @@ A `:line:col` suffix is stripped only on a path that is absolute or explicitly m
 Your wording is only touched when the message is **nothing but the path** — the
 "dropped files and pressed Enter" gesture:
 
-- images become `[image: name]`, everything else moves into the `[Attached files]` block
+- an image becomes `[attachment: name]` (kept neutral: the sniffer may still reject it), everything else moves into the `[Attached files]` block
 - a message with words in it is left exactly as typed; the block is appended on top
 - so pasting a stack trace or build log full of absolute paths does **not** tear those paths out of it — they are simply also offered as attachments
 
@@ -113,7 +113,10 @@ changes — no restart needed.
 
 ### Limits
 
-- Images are attached inline and **pi core resizes them** (via the `images.autoResize` setting), so an oversized screenshot is downscaled by pi rather than refused here. A file whose bytes are not really an image, or one over 32 MB, falls back to a path reference and tells you so.
+- Images are attached inline and **pi core resizes them** (via the `images.autoResize` setting), so an oversized screenshot is downscaled by pi rather than refused here. A file whose bytes are not really an image, or one over 32 MiB, falls back to a path reference
+and tells you so.
+- One message inlines at most **128 MiB** of image data; beyond that it travels as a path. With a
+  32-file queue, per-file bounds alone would still let a gigabyte be read into memory.
 - Nothing is copied anywhere except collapsed pastes. The model reads the file at its real location, so it must be inside the session's working directory for the agent to open it.
 - File **contents** are never inlined into the prompt — you get a path, and the model opens what it needs. That keeps a 200 KB log from costing tens of thousands of tokens, and lets the model seek to the relevant part instead of reading a truncated copy.
 - Resolution stops after **256 path-like candidates** in one message. A pasted build log is already the worst case: 8000 candidates cost ~650 ms before this cap and ~11 ms after, and the message itself is never modified.

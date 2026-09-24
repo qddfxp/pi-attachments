@@ -12,14 +12,18 @@ import piAttachments, {
   MAX_PENDING_ATTACHMENTS,
   MAX_RESOLVE_CANDIDATES,
   STATUS_KEY,
+  buildAttachmentOptions,
   buildPrompt,
   dedupeAttachments,
   extractAttachments,
   formatBytes,
   formatClipboardLabels,
+  imageFitsBudget,
   isDeliberatePathReference,
   isInlineableImage,
   isShellOrCommandInput,
+  MAX_CLIPBOARD_ENTRIES,
+  MAX_PICKER_ENTRIES,
   mergeAttachmentSettings,
   pasteFileName,
   parseClipboardFileList,
@@ -206,7 +210,7 @@ test("a message that is nothing but paths becomes the attachment block", () => {
 
   // An image dropped on its own leaves a short marker instead of a bare path.
   const imageOnly = extractAttachments(`${shotPath}`, sandbox);
-  assert.equal(imageOnly.text, "[image: shot.png]");
+  assert.equal(imageOnly.text, "[attachment: shot.png]");
 });
 
 test("leaves a log full of absolute paths alone", () => {
@@ -235,7 +239,7 @@ test("keeps the line number when the message carries a location", () => {
 test("keeps a short marker when only an image is dropped", () => {
   const parsed = extractAttachments(`${shotPath}?`, sandbox);
 
-  assert.equal(parsed.text, "[image: shot.png]?");
+  assert.equal(parsed.text, "[attachment: shot.png]?");
   assert.deepEqual(parsed.files.map((file) => file.name), ["shot.png"]);
   assert.equal(parsed.files[0].image, true);
 });
@@ -792,6 +796,50 @@ test("same-named clipboard files stay distinguishable in the picker", () => {
   assert.notEqual(labels[0], labels[1]);
   // Positional lookup is what the handler uses, so each label must map back.
   assert.equal(labels.indexOf(labels[1]), 1);
+});
+
+test("the picker resolves each option back to its own file", () => {
+  const clipboard = [
+    { path: join(sandbox, "a", "report.pdf"), name: "report.pdf", size: 1, image: false },
+    { path: join(sandbox, "b", "report.pdf"), name: "report.pdf", size: 1, image: false },
+  ];
+  const { options, byOption } = buildAttachmentOptions(clipboard, ["notes.md", "shot.png"]);
+
+  assert.equal(new Set(options).size, options.length, "duplicate options make a file unselectable");
+  assert.equal(options.length, 4);
+  assert.equal(byOption.get(options[0]), clipboard[0].path);
+  assert.equal(byOption.get(options[1]), clipboard[1].path);
+  assert.equal(byOption.get("notes.md"), "notes.md");
+});
+
+test("the picker caps both sources instead of dumping the filesystem", () => {
+  const clipboard = Array.from({ length: MAX_CLIPBOARD_ENTRIES + 20 }, (_, index) => ({
+    path: join(sandbox, `c${index}`, "f.pdf"),
+    name: "f.pdf",
+    size: 1,
+    image: false,
+  }));
+  const directory = Array.from({ length: MAX_PICKER_ENTRIES + 20 }, (_, index) => `file${index}.txt`);
+
+  const { options, byOption } = buildAttachmentOptions(clipboard, directory);
+
+  assert.equal(options.filter((option) => option.startsWith("📋")).length, MAX_CLIPBOARD_ENTRIES);
+  assert.equal(options.length, MAX_CLIPBOARD_ENTRIES + MAX_PICKER_ENTRIES);
+  assert.equal(byOption.size, options.length, "every option must resolve to something");
+});
+
+test("the per-message image budget stops runaway inlining", () => {
+  const image = { path: join(sandbox, "big.png"), name: "big.png", size: 10 * 1024 * 1024, image: true };
+
+  assert.equal(imageFitsBudget(0, image), true);
+  assert.equal(
+    imageFitsBudget(127 * 1024 * 1024, image),
+    false,
+    "near the budget a 10 MiB image must not be read",
+  );
+  assert.equal(imageFitsBudget(0, { ...image, size: 200 * 1024 * 1024 }), false);
+  // Non-images never count against the image budget.
+  assert.equal(imageFitsBudget(0, { ...image, image: false }), false);
 });
 
 test("paste file names use local time", () => {

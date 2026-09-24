@@ -27,6 +27,19 @@ All notable changes to this project are documented here. The format follows
 - The image size message is derived from the constant, so it says `32 MiB` and cannot
   drift from `MAX_IMAGE_READ_BYTES` again.
 
+### Fixed
+
+- The in-prompt marker no longer claims `image:` for a file that the sniffer rejected.
+  A `.png` that is really text used to end up as `[image: liar.png]`; it is now
+  `[attachment: liar.png]`, which stays true whether or not the bytes are inlined.
+
+### Added
+
+- A per-message image budget (128 MiB). With a 32-file queue, per-file bounds alone
+  still allowed a gigabyte of image data to be read into memory before anything was sent.
+- The picker caps clipboard entries at 50, and options are now built together with their
+  option→path lookup, so a label can never disagree with what it resolves to.
+
 ### Added
 
 - `CHANGELOG.md`, README badges, and a `publish.yml` workflow that publishes on a `v*` tag
