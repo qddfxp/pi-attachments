@@ -27,8 +27,14 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 export const ATTACHMENT_BLOCK_HEADER = "[Attached files]";
 export const STATUS_KEY = "pi-attachments";
 
-/** Same budget pi uses for inline images; anything larger stays a path reference. */
-export const MAX_IMAGE_BYTES = 4.5 * 1024 * 1024;
+/**
+ * Sanity bound only — not a budget. pi core runs every prompt image through
+ * `_normalizePromptImages` (normalize + downscale, honouring the `images.autoResize`
+ * setting) after the input transform, so an oversized screenshot is resized by the
+ * core rather than refused here. This just stops a pathological file from being read
+ * into memory at all.
+ */
+export const MAX_IMAGE_READ_BYTES = 32 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_CANDIDATE_LENGTH = 4096;
@@ -360,17 +366,22 @@ export function isShellOrCommandInput(text: string, cwd: string): boolean {
   return resolveCandidate(firstToken.text, cwd) === null;
 }
 
+/** True when the file should be attached as an image instead of a path reference. */
+export function isInlineableImage(attachment: Attachment): boolean {
+  return attachment.image && attachment.size <= MAX_IMAGE_READ_BYTES;
+}
+
 function toImageContent(attachment: Attachment): ImageContent | null {
-  if (!attachment.image || attachment.size > MAX_IMAGE_BYTES) return null;
+  if (!isInlineableImage(attachment)) return null;
   let bytes: Buffer;
   try {
     bytes = readFileSync(attachment.path);
   } catch {
     return null;
   }
-  // Trust the magic bytes over the file name.
+  // Trust the magic bytes over the file name; the core handles resizing.
   const mimeType = sniffImageMimeType(bytes);
-  if (!mimeType || bytes.length > MAX_IMAGE_BYTES) return null;
+  if (!mimeType || bytes.length > MAX_IMAGE_READ_BYTES) return null;
   return { type: "image", data: bytes.toString("base64"), mimeType };
 }
 
@@ -441,7 +452,7 @@ export default function piAttachments(pi: ExtensionAPI): void {
       }
     }
     if (keptAsPath.length > 0) {
-      ctx.ui.notify(`${keptAsPath.join(", ")}：不是可内联的图片或超过 4.5MB，按路径交给模型`, "warning");
+      ctx.ui.notify(`${keptAsPath.join(", ")}：内容不是图片格式或超过 32MB，按路径交给模型`, "warning");
     }
 
     const text = buildPrompt(parsed.text, files);

@@ -14,6 +14,7 @@ import piAttachments, {
   dedupeAttachments,
   extractAttachments,
   isDeliberatePathReference,
+  isInlineableImage,
   isShellOrCommandInput,
   resolveCandidate,
   scanCandidateTokens,
@@ -139,6 +140,18 @@ test("scans quoted, bare, and escaped-space tokens", () => {
     scanCandidateTokens(spacedPath.replace(/ /g, "\\ ")).map((token) => token.text),
     [spacedPath],
   );
+});
+
+test("large images are inlined and left to the core to resize", () => {
+  const image = { path: join(sandbox, "big.png"), name: "big.png", size: 6 * 1024 * 1024, image: true };
+
+  // pi core runs prompt images through `_normalizePromptImages`, so 6MB must no
+  // longer fall back to a path reference the way the old 4.5MB budget did.
+  assert.equal(isInlineableImage(image), true);
+  // Absurd sizes are still refused rather than read into memory.
+  assert.equal(isInlineableImage({ ...image, size: 100 * 1024 * 1024 }), false);
+  // A file that only looks like an image is never inlined.
+  assert.equal(isInlineableImage({ ...image, image: false }), false);
 });
 
 test("sniffs the image formats pi can inline", () => {
