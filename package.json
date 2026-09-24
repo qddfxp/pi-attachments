@@ -7,7 +7,9 @@
     "pi",
     "attachments",
     "drag-and-drop",
-    "images"
+    "images",
+    "clipboard",
+    "paste"
   ],
   "license": "MIT",
   "author": "qddfxp",
@@ -29,7 +31,8 @@
   "files": [
     "extensions",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.mjs",

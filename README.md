@@ -1,11 +1,16 @@
 # pi-attachments
 
+[![npm version](https://img.shields.io/npm/v/pi-attachments.svg)](https://www.npmjs.com/package/pi-attachments)
+[![CI](https://github.com/qddfxp/pi-attachments/actions/workflows/ci.yml/badge.svg)](https://github.com/qddfxp/pi-attachments/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/pi-attachments.svg)](LICENSE)
+
 Drop a file into your terminal and it becomes a real attachment in the pi prompt.
 
 Dragging a file into a terminal only inserts its **path as text**. The model then has to notice the path, guess that it matters, and decide to read it. This extension does that part for you:
 
 - **Images** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are attached as image blocks, so the model sees them on the first turn — no tool round-trip.
-- **Any other file** is pulled out of your sentence and listed once at the end, so the model reads it on demand and your wording stays clean.
+- **Any other file** is listed once at the end as a path the model reads on demand, so your wording stays clean.
+- Files copied in Explorer/Finder can be attached from the clipboard, and a 5,000-line paste is collapsed into a file instead of costing tens of thousands of tokens.
 
 ```
 看下这个 C:\work\proj\screenshot.png 对不对?     →  images: [screenshot.png]        正文不动
@@ -20,7 +25,7 @@ C:\work\proj\report.pdf                         →  正文就是附件块
 ## Install
 
 ```bash
-pi install npm:pi-attachments            # from npm, once published
+pi install npm:pi-attachments
 pi install git:github.com/qddfxp/pi-attachments
 pi install /absolute/path/to/pi-attachments
 
@@ -122,7 +127,8 @@ One `input` event handler. It scans the editor text for candidate paths, resolve
 { action: "transform", text: "<your words>", images: [{ type: "image", data, mimeType }] }
 ```
 
-No tools are registered, no files are written, and nothing is uploaded. The extension only reads image bytes for the ones you attach.
+No tools are registered and nothing is uploaded. The only file it ever writes is the
+collapsed paste described above; everything else it reads is a file you attached.
 
 ## Development
 
@@ -142,25 +148,27 @@ in all of them.
 
 ## Publishing
 
-The package is already shaped for the gallery: the `pi` manifest points at
-`extensions/`, and the `pi-package` keyword makes it show up on
+Published: [`pi-attachments` on npm](https://www.npmjs.com/package/pi-attachments), repository at
+[qddfxp/pi-attachments](https://github.com/qddfxp/pi-attachments). The `pi` manifest points at
+`extensions/`, and the `pi-package` keyword is what makes it show up on
 [pi.dev/packages](https://pi.dev/packages).
 
-The repository does not exist on GitHub yet, so create it first and push:
+To cut a release:
 
 ```bash
-gh repo create qddfxp/pi-attachments --public --source . --push
-# or create it on github.com, then:
-#   git remote add origin https://github.com/qddfxp/pi-attachments.git
-#   git push -u origin main
-
-npm version patch
+npm version patch          # or minor/major; commits and tags vX.Y.Z
+git push --follow-tags
 npm publish --access public
 ```
 
-`.github/workflows/ci.yml` starts running `npm run verify` on Ubuntu and Windows as
-soon as the repository has a remote. Windows is in the matrix on purpose: backslash
-paths, drive letters, and case-folded dedupe are the parts Linux CI cannot see.
+`.github/workflows/ci.yml` runs `npm run verify` on Ubuntu and Windows for every push.
+Windows is in the matrix on purpose: backslash paths, drive letters, and case-folded
+dedupe are the parts Linux CI cannot see — the first Linux run caught a bug where every
+POSIX absolute path was mistaken for a slash command.
+
+`.github/workflows/publish.yml` can publish from CI on a `v*` tag with npm provenance.
+It needs an `NPM_TOKEN` repository secret (a granular access token with *Read and write*
+for all packages); without the secret the job skips itself instead of failing.
 
 Add `"image"` or `"video"` to the `pi` block in `package.json` if you want a preview
 on the gallery card.
@@ -181,4 +189,6 @@ on the gallery card.
 { "attachments": { "pasteCollapseThreshold": 12000, "maxPendingAttachments": 32 } }
 ```
 
-发布：仓库还没建，先在 GitHub 建 `qddfxp/pi-attachments` 并推送（`gh repo create qddfxp/pi-attachments --public --source . --push`），然后 `npm publish --access public`；带上 `pi-package` 关键字就会出现在 pi 官方插件库。
+**运行时文案统一用英文**——其中折叠标记会直接进入你的提示词（和 `[Attached files]` 一样），所以必须语言中立；命令说明和通知也跟着统一，避免同一个包中英混排。
+
+发布：已发布在 npm（`pi install npm:pi-attachments`）与 [GitHub](https://github.com/qddfxp/pi-attachments)。发新版：`npm version patch && git push --follow-tags && npm publish`；改动历史见 `CHANGELOG.md`。

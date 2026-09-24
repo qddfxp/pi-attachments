@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import test from "node:test";
@@ -15,10 +15,13 @@ import piAttachments, {
   buildPrompt,
   dedupeAttachments,
   extractAttachments,
+  formatBytes,
+  formatClipboardLabels,
   isDeliberatePathReference,
   isInlineableImage,
   isShellOrCommandInput,
   mergeAttachmentSettings,
+  pasteFileName,
   parseClipboardFileList,
   resolveCandidate,
   scanCandidateTokens,
@@ -379,7 +382,7 @@ test("/attach stops accepting once the queue is full", async () => {
 
   await attach.handler(`./queue/q${MAX_PENDING_ATTACHMENTS}.txt`, ctx);
   assert.ok(
-    ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("上限")),
+    ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("Queue is full")),
     "overflowing the queue must warn instead of growing without bound",
   );
 
@@ -399,7 +402,7 @@ test("/attachments summarises a queue that is too long to list", async () => {
   await pi.commands.get("attachments").handler("", ctx);
 
   const message = ctx.notifications.at(-1).message;
-  assert.match(message, /…还有 5 个/);
+  assert.match(message, /and 5 more/);
   assert.equal(message.split("\n").length, MAX_LISTED_ATTACHMENTS + 1);
 });
 
@@ -487,7 +490,7 @@ test("/attach queues a file for the next message and clears it afterwards", asyn
 
   await pi.commands.get("attach").handler("./notes.md", ctx);
   assert.match(ctx.statuses.get(STATUS_KEY), /notes\.md/);
-  assert.ok(ctx.notifications.some((entry) => entry.message.includes("已附加")));
+  assert.ok(ctx.notifications.some((entry) => entry.message.includes("Attached ")));
 
   const result = await input({ type: "input", text: "总结一下", source: "interactive" }, ctx);
   assert.match(result.text, /总结一下/);
@@ -509,14 +512,14 @@ test("/attachments lists and clears the queue", async () => {
   const attachments = pi.commands.get("attachments");
 
   await attachments.handler("", ctx);
-  assert.ok(ctx.notifications.some((entry) => entry.message.includes("没有待发附件")));
+  assert.ok(ctx.notifications.some((entry) => entry.message.includes("Nothing is queued")));
 
   await pi.commands.get("attach").handler("./notes.md", ctx);
   await attachments.handler("", ctx);
   assert.ok(ctx.notifications.some((entry) => entry.message.includes("notes.md")));
 
   await attachments.handler("clear", ctx);
-  assert.ok(ctx.notifications.some((entry) => entry.message.includes("已清空 1")));
+  assert.ok(ctx.notifications.some((entry) => entry.message.includes("Cleared 1 pending")));
   assert.equal(ctx.statuses.has(STATUS_KEY), false);
 });
 
@@ -662,7 +665,7 @@ test("a long paste becomes an attachment instead of being sent inline", async ()
     const result = await input({ type: "input", text: blob, source: "interactive" }, ctx);
 
     assert.equal(result.action, "transform");
-    assert.match(result.text, /已折叠为附件 paste-.*\.txt/);
+    assert.match(result.text, /collapsed into paste-.*\.txt/);
     assert.match(result.text, new RegExp(ATTACHMENT_BLOCK_HEADER));
     assert.doesNotMatch(result.text, /build log line 39/, "the blob must not travel inline");
 
@@ -671,7 +674,7 @@ test("a long paste becomes an attachment instead of being sent inline", async ()
     assert.equal(written.length, before.length + 1);
     const saved = written.find((name) => !before.includes(name));
     assert.equal(readFileSync(join(sandbox, ATTACHMENTS_DIRECTORY, saved), "utf8"), blob);
-    assert.ok(ctx.notifications.some((entry) => entry.message.includes("长粘贴已存为")));
+    assert.ok(ctx.notifications.some((entry) => entry.message.includes("Long paste saved as")));
   });
 });
 
@@ -701,7 +704,7 @@ test("the pending queue limit comes from settings", async () => {
 
     await attach.handler("./queue/q2.txt", ctx);
     assert.ok(
-      ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("上限 2")),
+      ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("Queue is full (2")),
       "the configured limit must be reported, not the built-in default",
     );
   });
@@ -717,4 +720,106 @@ test("the picker lists the session directory and attaches what was picked", asyn
   assert.ok(ctx.selectCalls[0].choices.includes("notes.md"));
   assert.ok(ctx.selectCalls[0].choices.includes("shot.png"));
   assert.match(ctx.statuses.get(STATUS_KEY), /notes\.md/);
+});
+
+// ─── Regressions from the second review ─────────────────────────────────────
+
+test("a long shell command must not leave an orphan paste file", async () => {
+  await withProjectSettings({ pasteCollapseThreshold: 200 }, async () => {
+    const { input } = loadExtension();
+    const ctx = createStubCtx(sandbox);
+    const directory = join(sandbox, ATTACHMENTS_DIRECTORY);
+    const before = existsSync(directory)
+      ? readdirSync(directory).filter((name) => name.startsWith("paste-")).length
+      : 0;
+
+    const result = await input(
+      { type: "input", text: `!echo ${"x".repeat(400)}`, source: "interactive" },
+      ctx,
+    );
+
+    assert.equal(result.action, "continue");
+    const after = existsSync(directory)
+      ? readdirSync(directory).filter((name) => name.startsWith("paste-")).length
+      : 0;
+    assert.equal(after, before, "a command that is thrown away must not write a paste file");
+    // No attachment was involved, so there is nothing to warn about either — and
+    // definitely no "long paste saved" notice for a file that was just discarded.
+    assert.equal(ctx.notifications.length, 0);
+
+    // The warning itself must still fire when a command really does carry a path.
+    const withPath = createStubCtx(sandbox);
+    await input({ type: "input", text: `!cat ${notesPath}`, source: "interactive" }, withPath);
+    assert.equal(withPath.notifications.length, 1);
+    assert.match(withPath.notifications[0].message, /not sent with ! or \//);
+  });
+});
+
+test("a long slash command is treated the same way", async () => {
+  await withProjectSettings({ pasteCollapseThreshold: 200 }, async () => {
+    const { input } = loadExtension();
+    const ctx = createStubCtx(sandbox);
+
+    const result = await input(
+      { type: "input", text: `/skill ${"y".repeat(400)}`, source: "interactive" },
+      ctx,
+    );
+
+    assert.equal(result.action, "continue");
+    assert.equal(ctx.notifications.filter((entry) => entry.type === "info").length, 0);
+  });
+});
+
+test("/attachments clear is case-insensitive", async () => {
+  const { pi } = loadExtension();
+  const ctx = createStubCtx(sandbox);
+
+  await pi.commands.get("attach").handler("./notes.md", ctx);
+  assert.equal(ctx.statuses.has(STATUS_KEY), true);
+
+  await pi.commands.get("attachments").handler("CLEAR", ctx);
+  assert.equal(ctx.statuses.has(STATUS_KEY), false);
+  assert.ok(ctx.notifications.some((entry) => entry.message.includes("Cleared 1")));
+});
+
+test("same-named clipboard files stay distinguishable in the picker", () => {
+  const first = { path: join(sandbox, "a", "report.pdf"), name: "report.pdf", size: 1, image: false };
+  const second = { path: join(sandbox, "b", "report.pdf"), name: "report.pdf", size: 1, image: false };
+  const labels = formatClipboardLabels([first, second]);
+
+  assert.equal(new Set(labels).size, 2, "duplicate option strings would make one file unselectable");
+  assert.ok(labels[0].includes("report.pdf"));
+  assert.notEqual(labels[0], labels[1]);
+  // Positional lookup is what the handler uses, so each label must map back.
+  assert.equal(labels.indexOf(labels[1]), 1);
+});
+
+test("paste file names use local time", () => {
+  const name = pasteFileName(new Date(2026, 0, 2, 3, 4, 5));
+  assert.equal(name, "paste-20260102-030405.txt");
+});
+
+test("byte formatting follows the constant", () => {
+  assert.equal(formatBytes(32 * 1024 * 1024), "32 MiB");
+  assert.equal(formatBytes(1024), "1 KiB");
+  assert.equal(formatBytes(4.5 * 1024 * 1024), "4.5 MiB");
+});
+
+test("the picker follows symlinks to files", async (t) => {
+  const link = join(sandbox, "linked-notes.md");
+  try {
+    symlinkSync(notesPath, link, "file");
+  } catch (error) {
+    t.skip(`cannot create a symlink here: ${error.code}`);
+    return;
+  }
+
+  const { pi } = loadExtension();
+  const ctx = createStubCtx(sandbox);
+  await pi.commands.get("attach").handler("", ctx);
+
+  assert.ok(
+    ctx.selectCalls[0].choices.includes("linked-notes.md"),
+    "Dirent.isFile() is an lstat, so a symlink must be followed explicitly",
+  );
 });

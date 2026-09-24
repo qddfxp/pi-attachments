@@ -1,3 +1,6 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# Written by the extension itself (collapsed pastes); it also self-ignores.
+.pi-attachments/

@@ -16,7 +16,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   CONFIG_DIR_NAME,
@@ -227,9 +227,15 @@ export function shouldCollapsePaste(text: string, threshold: number): boolean {
   return threshold > 0 && text.trim().length > threshold;
 }
 
+/**
+ * Local time, so a paste file name lines up with the clock the user is reading.
+ * Second precision; two pastes inside the same second are disambiguated by the
+ * write loop in `writePasteFile`.
+ */
 export function pasteFileName(now = new Date()): string {
-  const stamp = now.toISOString().replace(/[:.]/g, "-").replace("Z", "");
-  return `paste-${stamp}.txt`;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `paste-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+    + `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
 }
 
 /**
@@ -578,14 +584,46 @@ function toImageContent(attachment: Attachment): ImageContent | null {
   return { type: "image", data: bytes.toString("base64"), mimeType };
 }
 
+/**
+ * Picker labels for clipboard entries. Two files with the same name in different
+ * folders must stay tellable apart, so the parent folder goes in the label — and a
+ * pair that is still identical gets a positional suffix.
+ */
+export function formatClipboardLabels(files: Attachment[]): string[] {
+  const seen = new Map<string, number>();
+  return files.map((file) => {
+    const label = `📋 ${file.name}  (${basename(dirname(file.path))})`;
+    const count = seen.get(label) ?? 0;
+    seen.set(label, count + 1);
+    return count === 0 ? label : `${label} #${count + 1}`;
+  });
+}
+
+/** Human-readable size, so a message can never drift from the constant it describes. */
+export function formatBytes(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  if (mib >= 1) return `${Number(mib.toFixed(mib < 10 ? 1 : 0))} MiB`;
+  return `${Math.round(bytes / 1024)} KiB`;
+}
+
 function listFiles(directory: string): string[] {
   try {
     return readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
+      // `Dirent.isFile()` is an lstat, so a symlink to a file reports false and
+      // would silently never be offered. Follow the link instead.
+      .filter((entry) => isFileOnDisk(join(directory, entry.name)))
       .map((entry) => entry.name)
       .sort((a, b) => a.localeCompare(b));
   } catch {
     return [];
+  }
+}
+
+function isFileOnDisk(filePath: string): boolean {
+  try {
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -626,24 +664,30 @@ export default function piAttachments(pi: ExtensionAPI): void {
     const detected = [...parsed.files];
     let body = parsed.text;
 
+    // A shell command or slash command is executed literally; attachment paths must
+    // never become part of that string. This is judged *before* collapsing, or a long
+    // command would leave a paste file behind that nothing ever references.
+    const isCommand = isShellOrCommandInput(event.text, ctx.cwd);
+
     // A blob too long to be worth sending inline becomes a file the model opens
     // on demand — the same trade the attachment block already makes for files.
-    if (shouldCollapsePaste(body, settings.pasteCollapseThreshold)) {
+    if (!isCommand && shouldCollapsePaste(body, settings.pasteCollapseThreshold)) {
       const collapsed = writePasteFile(ctx.cwd, body);
       if (collapsed) {
         detected.push(collapsed);
-        body = `[粘贴内容 ${body.trim().length} 字符，已折叠为附件 ${collapsed.name}]`;
-        ctx.ui.notify(`长粘贴已存为 ${collapsed.name}（${collapsed.size} 字节）`, "info");
+        body = `[pasted content ${body.trim().length} chars, collapsed into ${collapsed.name}]`;
+        ctx.ui.notify(`Long paste saved as ${collapsed.name} (${collapsed.size} bytes)`, "info");
       }
     }
 
     const attachments = dedupeAttachments([...pending, ...detected]);
     if (attachments.length === 0) return { action: "continue" };
 
-    // A shell command or slash command is executed literally; attachment paths
-    // must never become part of that string.
-    if (isShellOrCommandInput(event.text, ctx.cwd)) {
-      ctx.ui.notify("附件不能和 ! / / 命令一起发送，请先移除路径或 /attachments clear", "warning");
+    if (isCommand) {
+      ctx.ui.notify(
+        "Attachments are not sent with ! or / commands. Send them in a normal message, or /attachments clear.",
+        "warning",
+      );
       return { action: "continue" };
     }
 
@@ -666,7 +710,10 @@ export default function piAttachments(pi: ExtensionAPI): void {
       }
     }
     if (keptAsPath.length > 0) {
-      ctx.ui.notify(`${keptAsPath.join(", ")}：内容不是图片格式或超过 32MB，按路径交给模型`, "warning");
+      ctx.ui.notify(
+        `${keptAsPath.join(", ")}: not an image on inspection, or over ${formatBytes(MAX_IMAGE_READ_BYTES)} — passed on as a path`,
+        "warning",
+      );
     }
 
     const text = buildPrompt(body, files);
@@ -679,7 +726,7 @@ export default function piAttachments(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("attach", {
-    description: "把文件附加到下一条消息（不拖拽的替代方式）",
+    description: "Attach a file to the next message (drag-and-drop alternative)",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const files = listFiles(completionCwd)
         .slice(0, MAX_PICKER_ENTRIES);
@@ -703,64 +750,65 @@ export default function piAttachments(pi: ExtensionAPI): void {
         const fromClipboard = (await clipboardRead)
           .map((filePath) => resolveCandidate(filePath, ctx.cwd))
           .filter((file): file is Attachment => file !== null);
+        const clipboardLabels = formatClipboardLabels(fromClipboard);
         const shown = files.slice(0, MAX_PICKER_ENTRIES);
-        const options = [
-          ...fromClipboard.map((file) => `📋 ${file.name}`),
-          ...shown,
-        ];
+        const options = [...clipboardLabels, ...shown];
         if (options.length === 0) {
-          ctx.ui.notify("当前目录没有文件，剪贴板里也没有文件路径", "warning");
+          ctx.ui.notify("No files in this directory and no file paths on the clipboard", "warning");
           return;
         }
         const title = files.length > shown.length
-          ? `选择要附加的文件（共 ${files.length} 个，仅列前 ${shown.length} 个）`
-          : "选择要附加的文件（当前目录）";
+          ? `Choose a file to attach (${files.length} here, first ${shown.length} listed)`
+          : "Choose a file to attach (session directory)";
         const picked = await ctx.ui.select(title, options);
         if (!picked) return;
-        const clipboardPick = fromClipboard.find((file) => `📋 ${file.name}` === picked);
-        chosen = clipboardPick ? clipboardPick.path : picked;
+        // Look the pick up by position: two same-named files in different folders
+        // produce different labels, and `find` on the label would always hit the first.
+        const clipboardIndex = clipboardLabels.indexOf(picked);
+        const clipboardPick = clipboardIndex >= 0 ? fromClipboard[clipboardIndex] : undefined;
+        chosen = clipboardPick?.path ?? picked;
       }
       if (!chosen) return;
 
       const attachment = resolveCandidate(chosen, ctx.cwd)
         ?? resolveCandidate(`./${chosen}`, ctx.cwd);
       if (!attachment) {
-        ctx.ui.notify(`找不到文件：${chosen}`, "error");
+        ctx.ui.notify(`No such file: ${chosen}`, "error");
         return;
       }
       const limit = settingsFor(ctx).maxPendingAttachments;
       const next = dedupeAttachments([...pending, attachment]);
       if (next.length > limit) {
-        ctx.ui.notify(`待发附件已达上限 ${limit} 个，先发送或 /attachments clear`, "warning");
+        ctx.ui.notify(`Queue is full (${limit} files). Send them, or /attachments clear.`, "warning");
         return;
       }
       pending = next;
       refreshStatus(ctx);
-      ctx.ui.notify(`已附加 ${attachment.name}`, "info");
+      ctx.ui.notify(`Attached ${attachment.name}`, "info");
     },
   });
 
   pi.registerCommand("attachments", {
-    description: "查看或清空待发附件（/attachments clear）",
+    description: "Show or clear the files queued for the next message (/attachments clear)",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => (
       "clear".startsWith(prefix.toLowerCase()) ? [{ value: "clear", label: "clear" }] : null
     ),
     handler: async (args, ctx) => {
-      if (args.trim() === "clear") {
+      if (args.trim().toLowerCase() === "clear") {
         const cleared = pending.length;
         pending = [];
         refreshStatus(ctx);
-        ctx.ui.notify(cleared > 0 ? `已清空 ${cleared} 个附件` : "当前没有待发附件", "info");
+        ctx.ui.notify(cleared > 0 ? `Cleared ${cleared} pending attachment(s)` : "Nothing is queued", "info");
         return;
       }
       if (pending.length === 0) {
-        ctx.ui.notify("当前没有待发附件。把文件拖进终端，或用 /attach 添加。", "info");
+        ctx.ui.notify("Nothing is queued. Drop a file into the terminal, or use /attach.", "info");
         return;
       }
       const shown = pending.slice(0, MAX_LISTED_ATTACHMENTS);
       const lines = shown.map((file) => `${file.name} — ${file.path}`);
       if (pending.length > shown.length) {
-        lines.push(`…还有 ${pending.length - shown.length} 个（/attachments clear 清空）`);
+        lines.push(`…and ${pending.length - shown.length} more (/attachments clear)`)
       }
       ctx.ui.notify(lines.join("\n"), "info");
     },
