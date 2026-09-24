@@ -4,55 +4,95 @@
 [![CI](https://github.com/qddfxp/pi-attachments/actions/workflows/ci.yml/badge.svg)](https://github.com/qddfxp/pi-attachments/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/pi-attachments.svg)](LICENSE)
 
-Drop a file into your terminal and it becomes a real attachment in the pi prompt.
+Drop a file into your [pi](https://github.com/earendil-works/pi) prompt and it arrives as a real
+attachment, not as a path the model has to notice and decide to read.
 
-Dragging a file into a terminal only inserts its **path as text**. The model then has to notice the path, guess that it matters, and decide to read it. This extension does that part for you:
-
-- **Images** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are attached as image blocks, so the model sees them on the first turn — no tool round-trip.
-- **Any other file** is listed once at the end as a path the model reads on demand, so your wording stays clean.
-- Files copied in Explorer/Finder can be attached from the clipboard, and a 5,000-line paste is collapsed into a file instead of costing tens of thousands of tokens.
+- **Images** are attached as image content, so the model sees them on the first turn — no tool round-trip.
+- **Any other file** is listed once under `[Attached files]`, as a path the model opens on demand.
+- **Huge pastes** collapse into a file, so a 5,000-line build log costs one read instead of tens of thousands of tokens.
 
 ```
-看下这个 C:\work\proj\screenshot.png 对不对?     →  images: [screenshot.png]        正文不动
-C:\work\proj\screenshot.png                     →  正文变成  [attachment: screenshot.png]
-总结一下 C:\work\proj\report.pdf                →  正文不动 + 末尾多一个附件块
-C:\work\proj\report.pdf                         →  正文就是附件块
+what you type                                    →  what the model receives
+──────────────────────────────────────────────────────────────────────────
+Look at C:\work\screenshot.png, is it right?     →  unchanged  (+ image content)
+看看这个 C:\work\screenshot.png 对不对?           →  unchanged  (+ image content)
+C:\work\screenshot.png                           →  [attachment: screenshot.png]
+Summarise C:\work\report.pdf                     →  unchanged  (+ block below)
+C:\work\report.pdf                               →  block only
 
-                                                   [Attached files]
-                                                   - C:\work\proj\report.pdf
+                                                    [Attached files]
+                                                    - C:\work\report.pdf
 ```
 
-## Install
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [What counts as a file reference](#what-counts-as-a-file-reference)
+- [When your text is rewritten](#when-your-text-is-rewritten)
+- [Long pastes](#long-pastes)
+- [Settings](#settings)
+- [Limits](#limits)
+- [FAQ](#faq)
+- [How it works](#how-it-works)
+- [Development](#development)
+- [Releasing](#releasing)
+- [License](#license)
+- [中文说明](#中文说明)
+
+## Quick start
+
+**1. Install it**
 
 ```bash
 pi install npm:pi-attachments
-pi install git:github.com/qddfxp/pi-attachments
-pi install /absolute/path/to/pi-attachments
-
-pi -e /absolute/path/to/pi-attachments   # try it without installing
+# or: pi install git:github.com/qddfxp/pi-attachments
+# or: pi install /absolute/path/to/pi-attachments
 ```
 
-Or add it to `~/.pi/agent/settings.json` yourself:
+**2. Confirm pi picked it up**
 
-```json
-{ "extensions": ["/absolute/path/to/pi-attachments/extensions/pi-attachments.ts"] }
+```bash
+pi list        # pi-attachments should be listed
+pi             # start a session
+> /attach      # if the extension is loaded, pi opens a file picker;
+               # if it is not, pi reports an unknown command
+```
+
+**3. Attach something**
+
+Three ways, all equivalent:
+
+| Gesture | How |
+|---|---|
+| Drag a file onto the terminal, press Enter | Most direct — the path becomes an attachment |
+| Type `/attach` and pick a file | Clipboard files first, then the session directory |
+| Copy a file in Explorer/Finder, then `/attach` | Showed at the top of the picker with a `📋` prefix |
+
+While anything is queued, the footer shows `📎 1: screenshot.png`, and `/attachments` lists the
+queue (`/attachments clear` empties it).
+
+To try it without installing: `pi -e /absolute/path/to/pi-attachments`.
+
+To update or remove:
+
+```bash
+pi update --extensions
+pi remove npm:pi-attachments
 ```
 
 ## Usage
 
 | You do | What happens |
 |---|---|
-| Drag a file onto the terminal | Its path is detected and turned into an attachment on send |
-| Paste a path | Same — quoted paths and `\ `-escaped spaces are understood too |
-| Copy a file in Explorer/Finder, then `/attach` | Clipboard files are offered first, labelled `📋 name` |
+| Drag a file onto the terminal | Its path is turned into an attachment when you send |
+| Paste a path | Same — quoted paths and escaped spaces (`C:\My\ Files\a.pdf`) are understood |
 | `/attach` | Pick a file: clipboard files first, then the session directory |
 | `/attach ./notes.md` | Attach a specific path |
-| `/attachments` | List what is queued for the next message |
+| `/attachments` | Show what is queued for the next message |
 | `/attachments clear` | Drop the queue |
 
-The footer shows `📎 1: screenshot.png` while something is queued.
-
-### What counts as a file reference
+## What counts as a file reference
 
 Only references you clearly meant as a file are converted:
 
@@ -70,27 +110,27 @@ Trailing punctuation stays in your sentence, and quotes or brackets around a pat
 A `:line:col` suffix is stripped only on a path that is absolute or explicitly marked — a bare
 `src/main.ts:12:5` is prose, exactly like `src/index.ts`.
 
-### When the text gets rewritten
+## When your text is rewritten
 
-Your wording is only touched when the message is **nothing but the path** — the
-"dropped files and pressed Enter" gesture:
+Your wording is touched only when the message is **nothing but paths** — the "dropped a file and
+pressed Enter" gesture:
 
-- an image becomes `[attachment: name]` (kept neutral: the sniffer may still reject it), everything else moves into the `[Attached files]` block
-- a message with words in it is left exactly as typed; the block is appended on top
-- so pasting a stack trace or build log full of absolute paths does **not** tear those paths out of it — they are simply also offered as attachments
+- an image becomes `[attachment: name]` (kept neutral: the sniffer can still reject it), everything else moves into the `[Attached files]` block
+- a message with words in it is left exactly as typed; the block is appended underneath
+- so pasting a stack trace or build log full of absolute paths does **not** tear those paths out of it — they stay, and are also offered as attachments
 
-**Files are never attached to `!` shell commands or `/` commands** — a path inside a
-shell command would be executed, so the extension refuses and warns instead.
+**Files are never attached to `!` shell commands or `/` commands** — a path inside a shell command
+would be executed, so the extension refuses and warns instead.
 
-### Long pastes
+## Long pastes
 
-A message longer than `pasteCollapseThreshold` (12,000 characters by default) is written
-to `<cwd>/.pi-attachments/paste-<timestamp>.txt` and replaced by a one-line pointer, so
-pasting a 5,000-line build log costs one file read instead of tens of thousands of
-tokens. The directory ignores itself in git, and the file also lands in the attachment
-block so the model knows to open it. Set the threshold to `0` to send everything inline.
+A message longer than `pasteCollapseThreshold` (12,000 characters by default) is written to
+`<cwd>/.pi-attachments/paste-<timestamp>.txt` and replaced by a one-line pointer, so pasting a
+5,000-line build log costs one file read instead of tens of thousands of tokens. The directory
+ignores itself in git, and the file also lands in the attachment block so the model knows to open
+it. Set the threshold to `0` to send everything inline.
 
-### Settings
+## Settings
 
 Optional `attachments` key in pi's settings:
 
@@ -108,30 +148,47 @@ Optional `attachments` key in pi's settings:
 }
 ```
 
-Invalid values are ignored rather than rejected, and settings are re-read when the file
-changes — no restart needed.
+Invalid values are ignored rather than rejected, and settings are re-read when the file changes —
+no restart needed.
 
-### Limits
+## Limits
 
-- Images are attached inline and **pi core resizes them** (via the `images.autoResize` setting), so an oversized screenshot is downscaled by pi rather than refused here. A file whose bytes are not really an image, or one over 32 MiB, falls back to a path reference
-and tells you so.
-- One message inlines at most **128 MiB** of image data; beyond that it travels as a path. With a
-  32-file queue, per-file bounds alone would still let a gigabyte be read into memory.
+- Images are attached inline and **pi core resizes them** (via the `images.autoResize` setting), so an oversized screenshot is downscaled by pi rather than refused here. A file whose bytes are not really an image, or one over 32 MiB, falls back to a path reference and tells you so.
+- One message inlines at most **128 MiB** of image data; anything beyond that travels as a path. With a 32-file queue, per-file bounds alone would still let a gigabyte be read into memory.
 - Nothing is copied anywhere except collapsed pastes. The model reads the file at its real location, so it must be inside the session's working directory for the agent to open it.
 - File **contents** are never inlined into the prompt — you get a path, and the model opens what it needs. That keeps a 200 KB log from costing tens of thousands of tokens, and lets the model seek to the relevant part instead of reading a truncated copy.
-- Resolution stops after **256 path-like candidates** in one message. A pasted build log is already the worst case: 8000 candidates cost ~650 ms before this cap and ~11 ms after, and the message itself is never modified.
+- Resolution stops after **256 path-like candidates** in one message. A pasted build log is the worst case: 8000 candidates cost ~650 ms before this cap and ~11 ms after, and the message itself is never modified.
 - `/attach` queues at most **32 files** (configurable), and `/attachments` lists the first 20 before summarising the rest. A block with hundreds of paths would dwarf the message it belongs to.
+
+## FAQ
+
+**Nothing happened when I dropped a file.** Check the footer — if it does not show `📎`, the path
+was not recognised. The file has to exist as typed, and a bare relative path like `src/index.ts` is
+deliberately treated as prose. Use `./src/index.ts` or `/attach` instead.
+
+**My pasted log lost its paths.** It did not: the text is only rewritten when the message is
+nothing but paths. With words in it, every path stays where you typed it.
+
+**The model got a path instead of my image.** The bytes were not an image (the name can lie), it was
+over 32 MiB, or the 128 MiB per-message budget was already spent. A warning names the file each time.
+
+**Attachments disappeared when I used `!` or `/`.** By design — a path inside a shell command would
+be executed. Send attachments in a normal message.
+
+**Does it upload anything?** No. There is no network code and no tools are registered; the only file
+ever written is the collapsed paste, next to your project.
 
 ## How it works
 
-One `input` event handler. It scans the editor text for candidate paths, resolves each against the session cwd, and returns a transform:
+One `input` event handler. It scans the editor text for candidate paths, resolves each against the
+session cwd, and returns a transform:
 
 ```ts
 { action: "transform", text: "<your words>", images: [{ type: "image", data, mimeType }] }
 ```
 
-No tools are registered and nothing is uploaded. The only file it ever writes is the
-collapsed paste described above; everything else it reads is a file you attached.
+Everything runs through pure, tested functions (`extractAttachments`, `isShellOrCommandInput`,
+`sniffImageMimeType`, …), so behaviour is pinned by tests rather than by running pi.
 
 ## Development
 
@@ -140,23 +197,19 @@ npm install          # types only; the SDK is a peer dependency
 npm run verify       # typecheck + tests + a load through pi's own loader
 ```
 
-`npm run check:load` is worth knowing about: it runs `discoverAndLoadExtensions`
-from the SDK — the exact code path `pi -e` uses — so a green run means pi really
-can discover the extension, not just that it compiles.
+`npm run check:load` is worth knowing: it calls `discoverAndLoadExtensions` from the SDK — the exact
+code path `pi -e` uses — so a green run means pi can really load the extension, not just that it
+compiles.
 
-Verified against SDK 0.85.1 and 0.87.1. `peerDependencies` is `>=0.85.0` because
-that is the oldest version the extension was actually loaded with; the API surface
-it uses (`input` events, `registerCommand`, `ui.setStatus`/`notify`/`select`) exists
-in all of them.
+Verified against SDK 0.85.1 and 0.87.1. `peerDependencies` is `>=0.85.0` because that is the oldest
+version the extension was actually loaded with; the API surface it uses (`input` events,
+`registerCommand`, `ui.setStatus`/`notify`/`select`) exists in all of them.
 
-## Publishing
+CI runs `npm run verify` on Ubuntu **and** Windows. Windows is in the matrix on purpose: backslash
+paths, drive letters, and case-folded dedupe are invisible on Linux — the first Linux run caught a
+bug where every POSIX absolute path was mistaken for a slash command.
 
-Published: [`pi-attachments` on npm](https://www.npmjs.com/package/pi-attachments), repository at
-[qddfxp/pi-attachments](https://github.com/qddfxp/pi-attachments). The `pi` manifest points at
-`extensions/`, and the `pi-package` keyword is what makes it show up on
-[pi.dev/packages](https://pi.dev/packages).
-
-To cut a release:
+## Releasing
 
 ```bash
 npm version patch          # or minor/major; commits and tags vX.Y.Z
@@ -164,34 +217,25 @@ git push --follow-tags
 npm publish --access public
 ```
 
-`.github/workflows/ci.yml` runs `npm run verify` on Ubuntu and Windows for every push.
-Windows is in the matrix on purpose: backslash paths, drive letters, and case-folded
-dedupe are the parts Linux CI cannot see — the first Linux run caught a bug where every
-POSIX absolute path was mistaken for a slash command.
+`.github/workflows/publish.yml` can publish from CI on a `v*` tag with npm provenance. It needs an
+`NPM_TOKEN` repository secret (a granular access token with *Read and write* access to all packages);
+without the secret the job skips itself instead of failing. Changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
 
-`.github/workflows/publish.yml` can publish from CI on a `v*` tag with npm provenance.
-It needs an `NPM_TOKEN` repository secret (a granular access token with *Read and write*
-for all packages); without the secret the job skips itself instead of failing.
+## License
 
-Add `"image"` or `"video"` to the `pi` block in `package.json` if you want a preview
-on the gallery card.
+[MIT](LICENSE) © 2026 qddfxp
 
 ## 中文说明
 
-把文件拖进终端只会得到一串路径文本，模型得自己想到去读它。这个扩展把路径还原成真正的附件：**图片直接作为图片内容附上**（模型第一轮就看得见），**其他文件列进消息末尾的附件块**按需读取。
+把文件拖进终端只会得到一串路径文本。这个扩展把路径还原成真正的附件：**图片直接作为图片内容附上**，**其他文件列进末尾的 `[Attached files]` 块**交模型按需读取。
 
-用法：拖文件 / 粘贴路径 / `/attach` 选文件（**在资源管理器里复制了文件的话，剪贴板里的文件会排在选择列表最前面，带 `📋` 前缀**），页脚会显示 `📎` 待发附件。只识别你明确写成文件的引用（绝对路径、`@./x`、`./x`、`.\x`、`../x`、`~/x`、带引号或转义空格的路径），句子里的 `src/index.ts` 不会被动；`:行:列` 只在绝对路径或显式标记的相对路径上生效。
+**三步开始**：`pi install npm:pi-attachments` → `pi list` 确认 → 进 pi 后拖文件回车，或用 `/attach` 选择（资源管理器里复制过文件的话，剪贴板文件带 `📋` 排在最前）。待发时页脚显示 `📎`，`/attachments` 查看、`/attachments clear` 清空。
 
-**只有整条消息就是路径时才会改写你的正文**（拖完直接回车那种），其余情况正文原样不动、只在末尾加一个附件块——所以粘贴一堆绝对路径的报错日志不会被抠走路径。`!` shell 命令和 `/` 命令**不会**带附件（Linux 上以 `/` 开头的绝对路径不会被误判成命令）。图片直接内联、缩放交给 pi 内核（`images.autoResize`），内容不是图片格式或超过 32MB 时才退回按路径交给模型；单条消息最多解析 256 个候选路径（防大粘贴卡输入），`/attach` 队列上限 32 个。
+**识别范围**：绝对路径、`@./x`、`./x`、`.\x`、`../x`、`~/x`、带引号或转义空格的路径；句子里的 `src/index.ts` 不识别（避免误伤散文），`:行:列` 只在绝对路径或显式标记的相对路径上生效。
 
-**长粘贴会自动折叠**：超过 `pasteCollapseThreshold`（默认 12000 字符）的消息会写入 `<cwd>/.pi-attachments/paste-<时间戳>.txt`，正文里只剩一行指针——粘一段五千行日志就只花一次文件读取，而不是几万 token。
+**正文只在这条消息全是路径时才改写**（拖完直接回车那种）；其余情况原样不动、只在末尾加块——所以粘贴日志不会被抠走路径。`!` 和 `/` 命令不带附件。超过 `pasteCollapseThreshold`（默认 12000 字符）的长粘贴会写入 `<cwd>/.pi-attachments/paste-<时间戳>.txt`，正文只留一行指针。
 
-**可配置**：在 pi 的 settings.json 里加 `attachments` 键（用户级 `<agentDir>/settings.json`，项目级 `<cwd>/.pi/settings.json` 覆盖它、且只在项目受信任时生效）：
+**可配置**：settings.json 里加 `attachments` 键（`pasteCollapseThreshold`、`maxPendingAttachments`），项目级覆盖用户级、且仅在项目受信任时生效。运行时文案统一为英文（折叠标记会进入你的提示词，必须语言中立）。
 
-```json
-{ "attachments": { "pasteCollapseThreshold": 12000, "maxPendingAttachments": 32 } }
-```
-
-**运行时文案统一用英文**——其中折叠标记会直接进入你的提示词（和 `[Attached files]` 一样），所以必须语言中立；命令说明和通知也跟着统一，避免同一个包中英混排。
-
-发布：已发布在 npm（`pi install npm:pi-attachments`）与 [GitHub](https://github.com/qddfxp/pi-attachments)。发新版：`npm version patch && git push --follow-tags && npm publish`；改动历史见 `CHANGELOG.md`。
+完整细节（限制、FAQ、工作原理、开发）见上方英文各节。
