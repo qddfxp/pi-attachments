@@ -1,0 +1,5 @@
+# Keep the repository in LF regardless of the contributor's platform: CI runs on
+# both Ubuntu and Windows, and this package is published from the same tree.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

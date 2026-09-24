@@ -1,0 +1,50 @@
+{
+  "name": "pi-attachments",
+  "version": "0.1.0",
+  "description": "Drop or paste a file path into the pi prompt and it becomes a real attachment: images are attached inline, other files are listed for the model to read on demand.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "attachments",
+    "drag-and-drop",
+    "images"
+  ],
+  "license": "MIT",
+  "author": "YOUR NAME",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USER/pi-attachments.git"
+  },
+  "homepage": "https://github.com/YOUR_GITHUB_USER/pi-attachments#readme",
+  "bugs": "https://github.com/YOUR_GITHUB_USER/pi-attachments/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:load": "node scripts/load-check.mjs",
+    "verify": "npm run typecheck && npm test && npm run check:load"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}
