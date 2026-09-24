@@ -1,6 +1,6 @@
 {
   "name": "pi-attachments",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Drop or paste a file path into the pi prompt and it becomes a real attachment: images are attached inline, other files are listed for the model to read on demand.",
   "keywords": [
     "pi-package",
