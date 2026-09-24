@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import test from "node:test";
 
 import piAttachments, {
   ATTACHMENT_BLOCK_HEADER,
+  ATTACHMENTS_DIRECTORY,
+  DEFAULT_ATTACHMENT_SETTINGS,
   MAX_LISTED_ATTACHMENTS,
   MAX_PENDING_ATTACHMENTS,
   MAX_RESOLVE_CANDIDATES,
@@ -16,9 +18,13 @@ import piAttachments, {
   isDeliberatePathReference,
   isInlineableImage,
   isShellOrCommandInput,
+  mergeAttachmentSettings,
+  parseClipboardFileList,
   resolveCandidate,
   scanCandidateTokens,
+  shouldCollapsePaste,
   sniffImageMimeType,
+  writePasteFile,
 } from "../extensions/pi-attachments.ts";
 
 // A real 1x1 PNG: the magic bytes are what the extension sniffs.
@@ -63,13 +69,16 @@ function createStubPi() {
   };
 }
 
-function createStubCtx(cwd) {
+function createStubCtx(cwd, options = {}) {
   const notifications = [];
   const statuses = new Map();
+  const selectCalls = [];
   return {
     cwd,
     notifications,
     statuses,
+    selectCalls,
+    isProjectTrusted: () => options.trusted ?? true,
     ui: {
       notify(message, type) {
         notifications.push({ message, type });
@@ -78,8 +87,9 @@ function createStubCtx(cwd) {
         if (text === undefined) statuses.delete(key);
         else statuses.set(key, text);
       },
-      async select() {
-        return undefined;
+      async select(title, choices) {
+        selectCalls.push({ title, choices });
+        return options.selectResult;
       },
     },
   };
@@ -554,4 +564,157 @@ test("a picked completion resolves against the same directory the picker listed"
     process.chdir(previous);
     rmSync(elsewhere, { recursive: true, force: true });
   }
+});
+
+// ─── Clipboard file lists ───────────────────────────────────────────────────
+
+test("parses the three clipboard shapes into paths", () => {
+  // PowerShell's FileDropList: one plain path per line.
+  assert.deepEqual(
+    parseClipboardFileList(`${notesPath}\r\n${shotPath}\r\n`),
+    [notesPath, shotPath],
+  );
+  // Linux text/uri-list: percent-encoded file URIs, with comment lines.
+  assert.deepEqual(
+    parseClipboardFileList("# something\nfile:///home/me/my%20notes.md\n"),
+    ["/home/me/my notes.md"],
+  );
+  // Windows file URIs keep the drive letter.
+  assert.deepEqual(parseClipboardFileList("file:///C:/work/a.pdf"), ["C:/work/a.pdf"]);
+  // Empty clipboard, blank lines, duplicates.
+  assert.deepEqual(parseClipboardFileList(""), []);
+  assert.deepEqual(parseClipboardFileList("\n \n"), []);
+  assert.deepEqual(parseClipboardFileList(`${notesPath}\n${notesPath}`), [notesPath]);
+});
+
+// ─── Settings ───────────────────────────────────────────────────────────────
+
+test("merges settings layers and ignores junk", () => {
+  assert.deepEqual(mergeAttachmentSettings(), DEFAULT_ATTACHMENT_SETTINGS);
+
+  const merged = mergeAttachmentSettings(
+    { pasteCollapseThreshold: 500 },
+    { maxPendingAttachments: 3 },
+  );
+  assert.equal(merged.pasteCollapseThreshold, 500);
+  assert.equal(merged.maxPendingAttachments, 3);
+
+  // A later layer wins, and 0 stays 0 (it is how collapsing is switched off).
+  const overridden = mergeAttachmentSettings({ pasteCollapseThreshold: 500 }, { pasteCollapseThreshold: 0 });
+  assert.equal(overridden.pasteCollapseThreshold, 0);
+
+  const junk = mergeAttachmentSettings("nope", null, { pasteCollapseThreshold: "big" }, { maxPendingAttachments: -4 });
+  assert.equal(junk.pasteCollapseThreshold, DEFAULT_ATTACHMENT_SETTINGS.pasteCollapseThreshold);
+  assert.equal(junk.maxPendingAttachments, DEFAULT_ATTACHMENT_SETTINGS.maxPendingAttachments);
+});
+
+test("only collapses a paste that is longer than the threshold", () => {
+  assert.equal(shouldCollapsePaste("short message", 12000), false);
+  assert.equal(shouldCollapsePaste("x".repeat(12001), 12000), true);
+  // 0 disables the feature entirely.
+  assert.equal(shouldCollapsePaste("x".repeat(50000), 0), false);
+});
+
+test("writes a collapsed paste into the self-ignoring attachment directory", () => {
+  const text = `line one\nline two\n${"x".repeat(50)}`;
+  const written = writePasteFile(sandbox, text);
+
+  assert.ok(written, "the paste file should have been written");
+  assert.match(written.name, /^paste-.*\.txt$/);
+  assert.equal(written.image, false);
+  assert.equal(readFileSync(written.path, "utf8"), text);
+  assert.equal(readFileSync(join(sandbox, ATTACHMENTS_DIRECTORY, ".gitignore"), "utf8"), "*\n");
+
+  // Two pastes in the same millisecond must not overwrite each other.
+  const sameInstant = new Date("2026-01-01T00:00:00.000Z");
+  const first = writePasteFile(sandbox, "a", sameInstant);
+  const second = writePasteFile(sandbox, "b", sameInstant);
+  assert.ok(first && second);
+  assert.notEqual(first.path, second.path);
+  assert.equal(readFileSync(first.path, "utf8"), "a");
+  assert.equal(readFileSync(second.path, "utf8"), "b");
+});
+
+// ─── Settings wiring in the handler ─────────────────────────────────────────
+
+/** Writes the project settings file and removes it again afterwards. */
+async function withProjectSettings(settings, run) {
+  const directory = join(sandbox, ".pi");
+  mkdirSync(directory, { recursive: true });
+  const file = join(directory, "settings.json");
+  writeFileSync(file, JSON.stringify({ attachments: settings }));
+  try {
+    // Await inside try, otherwise the cleanup runs before an async body finishes.
+    return await run();
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
+test("a long paste becomes an attachment instead of being sent inline", async () => {
+  const blob = Array.from({ length: 40 }, (_, index) => `[12:00:${index}] build log line ${index}`).join("\n");
+
+  await withProjectSettings({ pasteCollapseThreshold: 200 }, async () => {
+    const { input } = loadExtension();
+    const ctx = createStubCtx(sandbox);
+    const before = readdirSync(join(sandbox, ATTACHMENTS_DIRECTORY)).filter((name) => name.startsWith("paste-"));
+
+    const result = await input({ type: "input", text: blob, source: "interactive" }, ctx);
+
+    assert.equal(result.action, "transform");
+    assert.match(result.text, /已折叠为附件 paste-.*\.txt/);
+    assert.match(result.text, new RegExp(ATTACHMENT_BLOCK_HEADER));
+    assert.doesNotMatch(result.text, /build log line 39/, "the blob must not travel inline");
+
+    const written = readdirSync(join(sandbox, ATTACHMENTS_DIRECTORY))
+      .filter((name) => name.startsWith("paste-"));
+    assert.equal(written.length, before.length + 1);
+    const saved = written.find((name) => !before.includes(name));
+    assert.equal(readFileSync(join(sandbox, ATTACHMENTS_DIRECTORY, saved), "utf8"), blob);
+    assert.ok(ctx.notifications.some((entry) => entry.message.includes("长粘贴已存为")));
+  });
+});
+
+test("project settings are ignored for an untrusted project", async () => {
+  const blob = "x".repeat(400);
+
+  await withProjectSettings({ pasteCollapseThreshold: 10 }, async () => {
+    const { input } = loadExtension();
+    const ctx = createStubCtx(sandbox, { trusted: false });
+
+    const result = await input({ type: "input", text: blob, source: "interactive" }, ctx);
+
+    assert.equal(result.action, "continue", "with default settings a 400 char message is left alone");
+    assert.equal(ctx.notifications.length, 0);
+  });
+});
+
+test("the pending queue limit comes from settings", async () => {
+  await withProjectSettings({ maxPendingAttachments: 2 }, async () => {
+    const { pi } = loadExtension();
+    const ctx = createStubCtx(sandbox);
+    const attach = pi.commands.get("attach");
+
+    await attach.handler("./queue/q0.txt", ctx);
+    await attach.handler("./queue/q1.txt", ctx);
+    assert.match(ctx.statuses.get(STATUS_KEY), /^📎 2:/);
+
+    await attach.handler("./queue/q2.txt", ctx);
+    assert.ok(
+      ctx.notifications.some((entry) => entry.type === "warning" && entry.message.includes("上限 2")),
+      "the configured limit must be reported, not the built-in default",
+    );
+  });
+});
+
+test("the picker lists the session directory and attaches what was picked", async () => {
+  const { pi } = loadExtension();
+  const ctx = createStubCtx(sandbox, { selectResult: "notes.md" });
+
+  await pi.commands.get("attach").handler("", ctx);
+
+  assert.equal(ctx.selectCalls.length, 1);
+  assert.ok(ctx.selectCalls[0].choices.includes("notes.md"));
+  assert.ok(ctx.selectCalls[0].choices.includes("shot.png"));
+  assert.match(ctx.statuses.get(STATUS_KEY), /notes\.md/);
 });

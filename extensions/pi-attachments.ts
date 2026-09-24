@@ -14,18 +14,23 @@
  * `src/index.ts` in a sentence stays text.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, extname, isAbsolute, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  CONFIG_DIR_NAME,
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 
 /** Marks the path listing appended to an outgoing message. Matches the pi-web UI. */
 export const ATTACHMENT_BLOCK_HEADER = "[Attached files]";
 export const STATUS_KEY = "pi-attachments";
+/** Where collapsed pastes land, next to the other per-session attachments. */
+export const ATTACHMENTS_DIRECTORY = ".pi-attachments";
 
 /**
  * Sanity bound only — not a budget. pi core runs every prompt image through
@@ -65,6 +70,194 @@ export interface AutocompleteItem {
   value: string;
   label: string;
   description?: string;
+}
+
+// ─── Settings ───────────────────────────────────────────────────────────────
+
+/**
+ * Optional `attachments` key in pi's `settings.json`:
+ *
+ *   { "attachments": { "pasteCollapseThreshold": 12000, "maxPendingAttachments": 32 } }
+ *
+ * Project settings (`<cwd>/<CONFIG_DIR_NAME>/settings.json`) win over user settings
+ * (`<agentDir>/settings.json`), and project settings are only honoured for a trusted
+ * project — the same rule pi applies to project-local resources.
+ */
+export interface AttachmentSettings {
+  /** Character count above which a pasted blob is written to a file. 0 disables it. */
+  pasteCollapseThreshold: number;
+  /** How many files `/attach` may queue before it starts refusing. */
+  maxPendingAttachments: number;
+}
+
+export const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
+  // Well past a long code review comment, well below a pasted build log.
+  pasteCollapseThreshold: 12000,
+  maxPendingAttachments: MAX_PENDING_ATTACHMENTS,
+};
+
+function nonNegativeInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+/** Merges settings layers in order; later layers win. Unknown keys are ignored. */
+export function mergeAttachmentSettings(...layers: unknown[]): AttachmentSettings {
+  const merged = { ...DEFAULT_ATTACHMENT_SETTINGS };
+  for (const layer of layers) {
+    if (!layer || typeof layer !== "object") continue;
+    const source = layer as Record<string, unknown>;
+    if ("pasteCollapseThreshold" in source) {
+      merged.pasteCollapseThreshold = nonNegativeInteger(
+        source.pasteCollapseThreshold,
+        merged.pasteCollapseThreshold,
+      );
+    }
+    if ("maxPendingAttachments" in source) {
+      merged.maxPendingAttachments = nonNegativeInteger(
+        source.maxPendingAttachments,
+        merged.maxPendingAttachments,
+      );
+    }
+  }
+  return merged;
+}
+
+function readAttachmentsKey(filePath: string): unknown {
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as { attachments?: unknown };
+    return parsed?.attachments;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Caches parsed settings per file until its mtime changes. */
+function createSettingsReader(): (filePath: string) => unknown {
+  const cache = new Map<string, { mtimeMs: number; value: unknown }>();
+  return (filePath: string) => {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(filePath).mtimeMs;
+    } catch {
+      cache.delete(filePath);
+      return undefined;
+    }
+    const cached = cache.get(filePath);
+    if (cached && cached.mtimeMs === mtimeMs) return cached.value;
+    const value = readAttachmentsKey(filePath);
+    cache.set(filePath, { mtimeMs, value });
+    return value;
+  };
+}
+
+// ─── Clipboard files ────────────────────────────────────────────────────────
+
+/**
+ * Turns a clipboard dump into candidate paths.
+ *
+ * Accepts the three shapes the platform helpers produce: a plain path per line
+ * (PowerShell's FileDropList), `file://` URIs (Linux `text/uri-list`), and a single
+ * POSIX path. Pure, so the parsing is testable without a clipboard.
+ */
+export function parseClipboardFileList(raw: string): string[] {
+  const paths: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    let candidate = trimmed;
+    if (/^file:\/\//i.test(trimmed)) {
+      try {
+        candidate = decodeURIComponent(new URL(trimmed).pathname);
+      } catch {
+        continue;
+      }
+      // `file:///C:/x/y` — drop the leading slash Windows does not want.
+      if (/^\/[a-zA-Z]:/.test(candidate)) candidate = candidate.slice(1);
+    }
+    if (candidate && !paths.includes(candidate)) paths.push(candidate);
+  }
+  return paths;
+}
+
+function runQuietly(command: string, args: string[], timeoutMs = 4000): Promise<string> {
+  return new Promise((done) => {
+    execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
+      done(error && !stdout ? "" : String(stdout ?? ""));
+    });
+  });
+}
+
+/**
+ * File paths currently on the OS clipboard.
+ *
+ * Every platform needs an external helper and none is guaranteed to be installed,
+ * so any failure degrades to "no clipboard files" instead of throwing.
+ */
+export async function readClipboardFiles(): Promise<string[]> {
+  let raw = "";
+  if (process.platform === "win32") {
+    raw = await runQuietly("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Get-Clipboard -Format FileDropList | ForEach-Object { $_.FullName }",
+    ]);
+  } else if (process.platform === "darwin") {
+    raw = await runQuietly("osascript", ["-e", "POSIX path of (the clipboard as alias)"]);
+  } else {
+    raw = await runQuietly("wl-paste", ["--type", "text/uri-list"]);
+    if (!raw) raw = await runQuietly("xclip", ["-selection", "clipboard", "-t", "text/uri-list", "-o"]);
+  }
+
+  return parseClipboardFileList(raw).filter((candidate) => {
+    try {
+      return statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+// ─── Collapsing a long paste ────────────────────────────────────────────────
+
+/** True when the message is long enough that a file reference beats sending it all. */
+export function shouldCollapsePaste(text: string, threshold: number): boolean {
+  return threshold > 0 && text.trim().length > threshold;
+}
+
+export function pasteFileName(now = new Date()): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-").replace("Z", "");
+  return `paste-${stamp}.txt`;
+}
+
+/**
+ * Writes a collapsed paste into the session's attachment directory, so the model
+ * reads only the part it needs and the transcript keeps a stable pointer.
+ */
+export function writePasteFile(cwd: string, text: string, now = new Date()): Attachment | null {
+  try {
+    const directory = join(cwd, ATTACHMENTS_DIRECTORY);
+    mkdirSync(directory, { recursive: true });
+    const gitignorePath = join(directory, ".gitignore");
+    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "*\n", { flag: "wx" });
+
+    const stem = pasteFileName(now).replace(/\.txt$/, "");
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const name = `${stem}${attempt === 0 ? "" : `-${attempt}`}.txt`;
+      const destination = join(directory, name);
+      try {
+        writeFileSync(destination, text, { flag: "wx" });
+        return { path: destination, name, size: Buffer.byteLength(text), image: false };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** A path written straight into the message, with its offset for removal. */
@@ -405,6 +598,12 @@ export default function piAttachments(pi: ExtensionAPI): void {
    */
   let completionCwd = process.cwd();
 
+  const readSettingsFile = createSettingsReader();
+  const settingsFor = (ctx: ExtensionContext): AttachmentSettings => mergeAttachmentSettings(
+    readSettingsFile(join(getAgentDir(), "settings.json")),
+    ctx.isProjectTrusted() ? readSettingsFile(join(ctx.cwd, CONFIG_DIR_NAME, "settings.json")) : undefined,
+  );
+
   const refreshStatus = (ctx: ExtensionContext): void => {
     if (pending.length === 0) {
       ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -421,9 +620,24 @@ export default function piAttachments(pi: ExtensionAPI): void {
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return { action: "continue" };
+    const settings = settingsFor(ctx);
 
     const parsed = extractAttachments(event.text, ctx.cwd);
-    const attachments = dedupeAttachments([...pending, ...parsed.files]);
+    const detected = [...parsed.files];
+    let body = parsed.text;
+
+    // A blob too long to be worth sending inline becomes a file the model opens
+    // on demand — the same trade the attachment block already makes for files.
+    if (shouldCollapsePaste(body, settings.pasteCollapseThreshold)) {
+      const collapsed = writePasteFile(ctx.cwd, body);
+      if (collapsed) {
+        detected.push(collapsed);
+        body = `[粘贴内容 ${body.trim().length} 字符，已折叠为附件 ${collapsed.name}]`;
+        ctx.ui.notify(`长粘贴已存为 ${collapsed.name}（${collapsed.size} 字节）`, "info");
+      }
+    }
+
+    const attachments = dedupeAttachments([...pending, ...detected]);
     if (attachments.length === 0) return { action: "continue" };
 
     // A shell command or slash command is executed literally; attachment paths
@@ -455,7 +669,7 @@ export default function piAttachments(pi: ExtensionAPI): void {
       ctx.ui.notify(`${keptAsPath.join(", ")}：内容不是图片格式或超过 32MB，按路径交给模型`, "warning");
     }
 
-    const text = buildPrompt(parsed.text, files);
+    const text = buildPrompt(body, files);
     if (!text && images.length === 0) return { action: "continue" };
 
     const mergedImages = [...(event.images ?? []), ...images];
@@ -476,14 +690,35 @@ export default function piAttachments(pi: ExtensionAPI): void {
     },
     handler: async (args, ctx) => {
       const requested = args.trim();
+      // Files copied in Explorer/Finder arrive as a clipboard file list; offer them
+      // first, because a drop target is not always reachable. Spawning the platform
+      // helper costs ~0.5s, so let it run while the directory is listed.
+      const clipboardRead = requested
+        ? Promise.resolve<string[]>([])
+        : readClipboardFiles();
+      const files = requested ? [] : listFiles(ctx.cwd);
+
       let chosen = requested;
       if (!chosen) {
-        const files = listFiles(ctx.cwd);
+        const fromClipboard = (await clipboardRead)
+          .map((filePath) => resolveCandidate(filePath, ctx.cwd))
+          .filter((file): file is Attachment => file !== null);
         const shown = files.slice(0, MAX_PICKER_ENTRIES);
+        const options = [
+          ...fromClipboard.map((file) => `📋 ${file.name}`),
+          ...shown,
+        ];
+        if (options.length === 0) {
+          ctx.ui.notify("当前目录没有文件，剪贴板里也没有文件路径", "warning");
+          return;
+        }
         const title = files.length > shown.length
           ? `选择要附加的文件（共 ${files.length} 个，仅列前 ${shown.length} 个）`
           : "选择要附加的文件（当前目录）";
-        chosen = await ctx.ui.select(title, shown) ?? "";
+        const picked = await ctx.ui.select(title, options);
+        if (!picked) return;
+        const clipboardPick = fromClipboard.find((file) => `📋 ${file.name}` === picked);
+        chosen = clipboardPick ? clipboardPick.path : picked;
       }
       if (!chosen) return;
 
@@ -493,9 +728,10 @@ export default function piAttachments(pi: ExtensionAPI): void {
         ctx.ui.notify(`找不到文件：${chosen}`, "error");
         return;
       }
+      const limit = settingsFor(ctx).maxPendingAttachments;
       const next = dedupeAttachments([...pending, attachment]);
-      if (next.length > MAX_PENDING_ATTACHMENTS) {
-        ctx.ui.notify(`待发附件已达上限 ${MAX_PENDING_ATTACHMENTS} 个，先发送或 /attachments clear`, "warning");
+      if (next.length > limit) {
+        ctx.ui.notify(`待发附件已达上限 ${limit} 个，先发送或 /attachments clear`, "warning");
         return;
       }
       pending = next;
