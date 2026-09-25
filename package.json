@@ -9,7 +9,13 @@
     "drag-and-drop",
     "images",
     "clipboard",
-    "paste"
+    "paste",
+    "pi-extension",
+    "pi-coding-agent",
+    "coding-agent",
+    "terminal",
+    "screenshot",
+    "file-attachment"
   ],
   "license": "MIT",
   "author": "qddfxp",
